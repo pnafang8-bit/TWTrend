@@ -4,8 +4,12 @@ import numpy as np
 from sqlalchemy import create_engine
 
 # ====== Supabase PostgreSQL 連線 ======
-DB_URL = "postgresql://admin:xxxx@db.supabase.co:5432/tw_market"
-engine = create_engine(DB_URL)
+DB_URL = "postgresql://postgres:twtrend@db.TWTrend.supabase.co:5432/tw_market"  # Updated with provided password and project ref
+try:
+    engine = create_engine(DB_URL)
+except Exception as e:
+    st.error(f"Database connection failed: {str(e)}")
+    st.stop()
 
 st.set_page_config(layout="wide", page_title="TWTrend Pro RS Dashboard")
 st.title("📈 TWTrend Pro | RS強勢股 + 爆發股雷達")
@@ -20,9 +24,13 @@ def load_price_data():
     FROM daily_price
     ORDER BY stock_id, trade_date
     """
-    df = pd.read_sql(query, engine)
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
-    return df
+    try:
+        df = pd.read_sql(query, engine)
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        return df
+    except Exception as e:
+        st.error(f"Error loading price data: {str(e)}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_index_data():
@@ -31,9 +39,13 @@ def load_index_data():
     FROM tw_index
     ORDER BY trade_date
     """
-    idx = pd.read_sql(query, engine)
-    idx["trade_date"] = pd.to_datetime(idx["trade_date"])
-    return idx
+    try:
+        idx = pd.read_sql(query, engine)
+        idx["trade_date"] = pd.to_datetime(idx["trade_date"])
+        return idx
+    except Exception as e:
+        st.error(f"Error loading index data: {str(e)}")
+        return pd.DataFrame()
 
 # ==============================
 # RS 計算
@@ -83,7 +95,11 @@ def add_revenue_growth(rs_df):
     FROM monthly_revenue
     ORDER BY stock_id, year_month
     """
-    rev = pd.read_sql(query, engine)
+    try:
+        rev = pd.read_sql(query, engine)
+    except Exception as e:
+        st.error(f"Error loading revenue data: {str(e)}")
+        return rs_df
     rev["YoY"] = rev.groupby("stock_id")["revenue"].pct_change(12)
     latest = rev.sort_values("year_month").groupby("stock_id").tail(1)
     latest = latest[["stock_id","YoY"]]
@@ -103,7 +119,11 @@ def add_institutional_flow(rs_df):
     FROM institutional_flow
     ORDER BY stock_id, trade_date
     """
-    flow = pd.read_sql(query, engine)
+    try:
+        flow = pd.read_sql(query, engine)
+    except Exception as e:
+        st.error(f"Error loading institutional flow: {str(e)}")
+        return rs_df
     flow["trade_date"] = pd.to_datetime(flow["trade_date"])
 
     def streak(series):
@@ -134,10 +154,10 @@ def backtest(price_df, explosive_df):
 
     for stock in explosive_list:
         data = price_df[price_df["stock_id"]==stock].sort_values("trade_date")
-        if len(data) < 40:
+        if len(data) < 21:  # Need at least 21 rows for ~20-day return
             continue
-        entry = data.iloc[-1]["close"]
-        future = data.iloc[-20]["close"]
+        entry = data.iloc[-21]["close"]  # ~20 days ago
+        future = data.iloc[-1]["close"]  # Today
         ret = (future - entry) / entry
         returns.append(ret)
 
@@ -153,6 +173,9 @@ def backtest(price_df, explosive_df):
 # ==============================
 price_df = load_price_data()
 index_df = load_index_data()
+
+if price_df.empty or index_df.empty:
+    st.stop()
 
 rs_df = calculate_rs(price_df, index_df)
 explosive_df = detect_explosive(price_df)
