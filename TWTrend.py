@@ -15,8 +15,8 @@ socket.getaddrinfo = _ipv4_only
 st.set_page_config(layout="wide", page_title="TWTrend Pro RS Dashboard")
 
 DB_URL = URL.create(
-drivername=“postgresql”,
-username=“postgres”,
+drivername="postgresql",
+username="postgres",
 password=”[Twtrend@9988]”,
 host=“db.zuwlrboozuwdkfevlces.supabase.co”,
 port=5432,
