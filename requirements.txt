@@ -1,6 +1,5 @@
 streamlit
 pandas
 numpy
-sqlalchemy
-psycopg2-binary
-pg8000
+FinMind
+python-dateutil
