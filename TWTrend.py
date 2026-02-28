@@ -1,182 +1,186 @@
-# TWTrend.py
 import streamlit as st
 import pandas as pd
-import pandas_ta as ta
-import requests
-from datetime import datetime, timedelta
-import pytz
-import time
+import numpy as np
+from sqlalchemy import create_engine
 
-# ---------------------------
-# 基本設定
-# ---------------------------
-tw_tz = pytz.timezone('Asia/Taipei')
-now_tw = datetime.now(tw_tz)
+# ====== Supabase PostgreSQL 連線 ======
+DB_URL = "postgresql://admin:xxxx@db.supabase.co:5432/tw_market"
+engine = create_engine(DB_URL)
 
-st.set_page_config(layout="wide", page_title="TWTrend | 全市場 RS 強勢股")
-st.title("💹 TWTrend 全市場 RS 強勢股掃描 (TWSE + TPEx)")
+st.set_page_config(layout="wide", page_title="TWTrend Pro RS Dashboard")
+st.title("📈 TWTrend Pro | RS強勢股 + 爆發股雷達")
 
-# ---------------------------
-# 取得上市股票清單
-# ---------------------------
-def get_twse_list():
-    url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json"
-    r = requests.get(url)
-    js = r.json()
-    df = pd.DataFrame(js['data'], columns=js['fields'])
-    return df['證券代號'].tolist()
+# ==============================
+# 讀取資料
+# ==============================
+@st.cache_data(ttl=3600)
+def load_price_data():
+    query = """
+    SELECT stock_id, trade_date, close
+    FROM daily_price
+    ORDER BY stock_id, trade_date
+    """
+    df = pd.read_sql(query, engine)
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    return df
 
-# ---------------------------
-# 取得上櫃股票清單
-# ---------------------------
-def get_tpex_list():
-    url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
-    df = pd.read_json(url)
-    return df['SecuritiesCompanyCode'].tolist()
+@st.cache_data(ttl=3600)
+def load_index_data():
+    query = """
+    SELECT trade_date, close
+    FROM tw_index
+    ORDER BY trade_date
+    """
+    idx = pd.read_sql(query, engine)
+    idx["trade_date"] = pd.to_datetime(idx["trade_date"])
+    return idx
 
-# ---------------------------
-# 抓大盤 (加權指數)
-# ---------------------------
-def fetch_twii_data(days=750):
-    closes = []
-    dates = [(now_tw - timedelta(days=i)).strftime('%Y%m%d') for i in range(days)]
+# ==============================
+# RS 計算
+# ==============================
+def calculate_rs(price_df, index_df):
+    merged = price_df.merge(index_df, on="trade_date", suffixes=("", "_index"))
+    merged["stock_ret_252"] = merged.groupby("stock_id")["close"].pct_change(252)
+    merged["index_ret_252"] = merged["close_index"].pct_change(252)
+    merged["RS"] = (merged["stock_ret_252"] / merged["index_ret_252"]) * 100
 
-    for d in dates[::-1]:
-        url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={d}&type=ALLBUT0999"
-        try:
-            r = requests.get(url, timeout=10)
-            js = r.json()
-            if 'data9' in js and js['data9']:
-                idx_close = float(js['data9'][0][1].replace(',', ''))
-                closes.append(idx_close)
-        except:
+    latest = merged.sort_values("trade_date").groupby("stock_id").tail(1)
+    latest = latest[["stock_id", "RS", "close"]]
+    latest.rename(columns={"stock_id": "Stock", "close": "Price"}, inplace=True)
+    latest["RS Score"] = latest["RS"].rank(pct=True) * 100
+    return latest.sort_values("RS Score", ascending=False)
+
+# ==============================
+# 爆發股技術條件
+# ==============================
+def detect_explosive(price_df):
+    results = []
+    for stock, data in price_df.groupby("stock_id"):
+        data = data.sort_values("trade_date").copy()
+        if len(data) < 200:
             continue
-        time.sleep(0.1)
 
-    return pd.Series(closes)
+        data["MA50"] = data["close"].rolling(50).mean()
+        data["MA150"] = data["close"].rolling(150).mean()
+        data["MA200"] = data["close"].rolling(200).mean()
 
-# ---------------------------
-# 抓個股歷史資料
-# ---------------------------
-def fetch_stock_data(stock_id, days=750):
-    dfs = []
-    months = pd.date_range(end=now_tw, periods=int(days/30)+2, freq='M')
-
-    for m in months:
-        date_str = m.strftime('%Y%m01')
-        url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={date_str}&stockNo={stock_id}"
-        try:
-            r = requests.get(url, timeout=10)
-            js = r.json()
-            if 'data' in js:
-                df = pd.DataFrame(js['data'], columns=[
-                    'Date','Volume','Turnover','Open','High','Low','Close','Change','Transaction'
-                ])
-                df['Date'] = pd.to_datetime(df['Date'].str.replace('/', '-'))
-                df['Close'] = df['Close'].str.replace(',', '').astype(float)
-                df['High'] = df['High'].str.replace(',', '').astype(float)
-                df['Low'] = df['Low'].str.replace(',', '').astype(float)
-                dfs.append(df[['Date','Close','High','Low']])
-        except:
-            continue
-        time.sleep(0.1)
-
-    if dfs:
-        out = pd.concat(dfs).sort_values('Date').drop_duplicates('Date')
-        out.set_index('Date', inplace=True)
-        return out.tail(750)
-    return None
-
-# ---------------------------
-# RS 計算 + Minervini 評分
-# ---------------------------
-def analyze_stock(stock_id, market_close):
-    try:
-        stock_df = fetch_stock_data(stock_id)
-        if stock_df is None or len(stock_df) < 250:
-            return None
-
-        close_s = stock_df['Close']
-        high_s = stock_df['High']
-        low_s = stock_df['Low']
-
-        ma50 = ta.sma(close_s, length=50)
-        ma150 = ta.sma(close_s, length=150)
-        ma200 = ta.sma(close_s, length=200)
-
-        stock_perf_1y = close_s.iloc[-1] / close_s.iloc[-252]
-        mkt_perf_1y = market_close.iloc[-1] / market_close.iloc[-252]
-        rs_1y = round((stock_perf_1y / mkt_perf_1y) * 100, 2)
-
-        stock_perf_3m = close_s.iloc[-1] / close_s.iloc[-63]
-        mkt_perf_3m = market_close.iloc[-1] / market_close.iloc[-63]
-        rs_3m = round((stock_perf_3m / mkt_perf_3m) * 100, 2)
-
-        q_return = round(((stock_perf_3m - 1) * 100), 2)
-
-        rs_line = (close_s / market_close.loc[stock_df.index]) * 100
-
-        last_p = float(close_s.iloc[-1])
-        m50 = float(ma50.iloc[-1])
-        m150 = float(ma150.iloc[-1])
-        m200 = float(ma200.iloc[-1])
-        m200_prev = float(ma200.iloc[-22])
-        rs_now = float(rs_line.iloc[-1])
-        rs_prev = float(rs_line.iloc[-22])
-        curr_h52 = float(high_s.rolling(window=252).max().iloc[-1])
-        curr_l52 = float(low_s.rolling(window=252).min().iloc[-1])
-
-        cond = [
-            last_p > m150 and last_p > m200,
-            m150 > m200,
-            m200 > m200_prev,
-            m50 > m150 and m50 > m200,
-            last_p > m50,
-            last_p >= (curr_l52 * 1.30),
-            last_p >= (curr_h52 * 0.75),
-            rs_now > rs_prev
-        ]
-
-        score = sum(cond)
-        if score == 0:
-            return None
-
-        return {
-            "代號": stock_id,
-            "總得分": score,
-            "現價": round(last_p, 2),
-            "季報酬(%)": q_return,
-            "RS年強度": rs_1y,
-            "RS季強度": rs_3m
-        }
-    except:
-        return None
-
-# ---------------------------
-# 主按鈕：全市場掃描
-# ---------------------------
-if st.button("🚀 自動掃描全市場 RS 強勢股"):
-    with st.spinner("抓取上市＋上櫃股票並計算 RS... (首次執行較慢)"):
-        twse = get_twse_list()
-        tpex = get_tpex_list()
-        stock_list = list(set(twse + tpex))
-
-        m_close = fetch_twii_data()
-
-        results = []
-        for sid in stock_list:
-            res = analyze_stock(sid, m_close)
-            if res:
-                results.append(res)
-
-        df_res = pd.DataFrame(results)
-        df_res = df_res.sort_values(
-            by=["RS年強度", "RS季強度", "總得分"],
-            ascending=False
+        last = data.iloc[-1]
+        cond = (
+            last["close"] > last["MA50"] and
+            last["MA50"] > last["MA150"] and
+            last["MA150"] > last["MA200"]
         )
 
-        st.success(f"完成掃描，共 {len(df_res)} 檔強勢股")
-        st.dataframe(df_res.head(50), use_container_width=True, height=600)
+        results.append({"Stock": stock, "Explosive Setup": cond})
+    return pd.DataFrame(results)
 
-        csv = df_res.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("下載完整RS排序", csv, "TW_RS_Ranking.csv", "text/csv")
+# ==============================
+# 財報動能
+# ==============================
+def add_revenue_growth(rs_df):
+    query = """
+    SELECT stock_id, year_month, revenue
+    FROM monthly_revenue
+    ORDER BY stock_id, year_month
+    """
+    rev = pd.read_sql(query, engine)
+    rev["YoY"] = rev.groupby("stock_id")["revenue"].pct_change(12)
+    latest = rev.sort_values("year_month").groupby("stock_id").tail(1)
+    latest = latest[["stock_id","YoY"]]
+
+    rs_df = rs_df.merge(latest, left_on="Stock", right_on="stock_id", how="left")
+    rs_df["YoY%"] = (rs_df["YoY"]*100).round(2)
+    rs_df["Revenue>30%"] = rs_df["YoY"] >= 0.3
+    rs_df.drop(columns=["stock_id","YoY"], inplace=True)
+    return rs_df
+
+# ==============================
+# 法人籌碼
+# ==============================
+def add_institutional_flow(rs_df):
+    query = """
+    SELECT stock_id, trade_date, foreign_buy, trust_buy
+    FROM institutional_flow
+    ORDER BY stock_id, trade_date
+    """
+    flow = pd.read_sql(query, engine)
+    flow["trade_date"] = pd.to_datetime(flow["trade_date"])
+
+    def streak(series):
+        s = (series > 0).astype(int)
+        return s.groupby((s != s.shift()).cumsum()).cumsum().max()
+
+    res = []
+    for stock, data in flow.groupby("stock_id"):
+        data = data.tail(5)
+        res.append({
+            "Stock": stock,
+            "Foreign Streak": streak(data["foreign_buy"]),
+            "Trust Streak": streak(data["trust_buy"])
+        })
+
+    inst = pd.DataFrame(res)
+    inst["Inst Buy Sync"] = (inst["Foreign Streak"]>=3) & (inst["Trust Streak"]>=3)
+
+    rs_df = rs_df.merge(inst, on="Stock", how="left")
+    return rs_df
+
+# ==============================
+# 回測引擎
+# ==============================
+def backtest(price_df, explosive_df):
+    returns = []
+    explosive_list = explosive_df[explosive_df["Explosive Setup"]==True]["Stock"]
+
+    for stock in explosive_list:
+        data = price_df[price_df["stock_id"]==stock].sort_values("trade_date")
+        if len(data) < 40:
+            continue
+        entry = data.iloc[-1]["close"]
+        future = data.iloc[-20]["close"]
+        ret = (future - entry) / entry
+        returns.append(ret)
+
+    if not returns:
+        return 0,0
+
+    avg_ret = np.mean(returns)
+    win_rate = np.mean([r>0 for r in returns])
+    return avg_ret, win_rate
+
+# ==============================
+# 主流程
+# ==============================
+price_df = load_price_data()
+index_df = load_index_data()
+
+rs_df = calculate_rs(price_df, index_df)
+explosive_df = detect_explosive(price_df)
+rs_df = rs_df.merge(explosive_df, on="Stock", how="left")
+
+rs_df = add_revenue_growth(rs_df)
+rs_df = add_institutional_flow(rs_df)
+
+# 最終爆發股條件
+final_df = rs_df[
+    (rs_df["RS Score"] > 90) &
+    (rs_df["Explosive Setup"]) &
+    (rs_df["Revenue>30%"]) &
+    (rs_df["Inst Buy Sync"])
+]
+
+# 回測
+avg_ret, win_rate = backtest(price_df, explosive_df)
+
+# ==============================
+# 儀表板輸出
+# ==============================
+col1, col2 = st.columns(2)
+col1.metric("爆發股20日平均報酬", f"{avg_ret*100:.2f}%")
+col2.metric("策略勝率", f"{win_rate*100:.1f}%")
+
+st.subheader("🔥 RS強勢股排名")
+st.dataframe(rs_df.sort_values("RS Score", ascending=False), use_container_width=True)
+
+st.subheader("🚀 最終爆發潛力股（10倍股雷達）")
+st.dataframe(final_df, use_container_width=True)
