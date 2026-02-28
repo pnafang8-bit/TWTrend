@@ -5,15 +5,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 import io
 
-# ==============================
-
-# 0. 頁面設定
-
-# ==============================
+# 0. Page config
 
 st.set_page_config(layout=“wide”, page_title=“TWTrend Pro RS Dashboard”)
 
-# ====== Supabase PostgreSQL 連線 ======
+# Supabase connection
 
 DB_URL = URL.create(
 drivername=“postgresql”,
@@ -37,12 +33,6 @@ engine = get_engine()
 
 if not engine:
 st.stop()
-
-# ==============================
-
-# 1. 資料讀取 (加入時間過濾避免記憶體溢出)
-
-# ==============================
 
 @st.cache_data(ttl=3600)
 def load_price_data():
@@ -76,51 +66,31 @@ except Exception as e:
 st.error(f”大盤資料載入錯誤: {str(e)}”)
 return pd.DataFrame()
 
-# ==============================
-
-# 2. 核心計算：RS 加權評分 (尼克萊/歐尼爾邏輯)
-
-# ==============================
-
 def calculate_rs_score(price_df, index_df):
 results = []
 for stock_id, group in price_df.groupby(“stock_id”):
 group = group.sort_values(“trade_date”)
 if len(group) < 240:
 continue
-
-```
-    curr_p = group.iloc[-1]["close"]
-    r3  = curr_p / group.iloc[-60]["close"]
-    r6  = curr_p / group.iloc[-120]["close"]
-    r9  = curr_p / group.iloc[-180]["close"]
-    r12 = curr_p / group.iloc[0]["close"]
-
-    weighted_ret = (r3 * 2) + r6 + r9 + r12
-
-    results.append({
-        "Stock": stock_id,
-        "Price": curr_p,
-        "Weighted_Ret": weighted_ret,
-        "High_1Y": group["close"].max()
-    })
-
+curr_p = group.iloc[-1][“close”]
+r3  = curr_p / group.iloc[-60][“close”]
+r6  = curr_p / group.iloc[-120][“close”]
+r9  = curr_p / group.iloc[-180][“close”]
+r12 = curr_p / group.iloc[0][“close”]
+weighted_ret = (r3 * 2) + r6 + r9 + r12
+results.append({
+“Stock”: stock_id,
+“Price”: curr_p,
+“Weighted_Ret”: weighted_ret,
+“High_1Y”: group[“close”].max()
+})
 rs_df = pd.DataFrame(results)
 if rs_df.empty:
-    return rs_df
-
-rs_df["RS Score"] = (rs_df["Weighted_Ret"].rank(pct=True) * 100).astype(int)
 return rs_df
-```
-
-# ==============================
-
-# 3. 技術、財報、籌碼過濾器
-
-# ==============================
+rs_df[“RS Score”] = (rs_df[“Weighted_Ret”].rank(pct=True) * 100).astype(int)
+return rs_df
 
 def apply_filters(rs_df, price_df):
-# A. 爆發股技術模板 (Minervini Setup)
 tech_results = []
 for stock_id, group in price_df.groupby(“stock_id”):
 if len(group) < 200:
@@ -129,15 +99,12 @@ data = group.sort_values(“trade_date”)
 ma50  = data[“close”].rolling(50).mean().iloc[-1]
 ma150 = data[“close”].rolling(150).mean().iloc[-1]
 ma200 = data[“close”].rolling(200).mean().iloc[-1]
+is_setup = (data.iloc[-1][“close”] > ma50 > ma150 > ma200)
+tech_results.append({“Stock”: stock_id, “Explosive Setup”: is_setup})
+tech_df = pd.DataFrame(tech_results)
+rs_df = rs_df.merge(tech_df, on=“Stock”, how=“left”)
 
 ```
-    is_setup = (data.iloc[-1]["close"] > ma50 > ma150 > ma200)
-    tech_results.append({"Stock": stock_id, "Explosive Setup": is_setup})
-
-tech_df = pd.DataFrame(tech_results)
-rs_df = rs_df.merge(tech_df, on="Stock", how="left")
-
-# B. 財報動能 (YoY > 30%)
 try:
     rev_query = "SELECT stock_id, revenue, year_month FROM monthly_revenue"
     rev = pd.read_sql(rev_query, engine)
@@ -149,7 +116,6 @@ try:
 except:
     rs_df["Rev_YoY"] = 0
 
-# C. 法人同步 (3日連買)
 try:
     inst_query = "SELECT stock_id, foreign_buy, trust_buy FROM institutional_flow ORDER BY trade_date DESC LIMIT 5000"
     inst = pd.read_sql(inst_query, engine)
@@ -162,13 +128,7 @@ except:
 return rs_df
 ```
 
-# ==============================
-
-# 4. 主介面展示
-
-# ==============================
-
-st.title(“📈 TWTrend Pro | RS 強勢股雷達”)
+st.title(“TWTrend Pro | RS 強勢股雷達”)
 
 with st.spinner(“正在從雲端計算全市場數據…”):
 df_p = load_price_data()
@@ -189,22 +149,14 @@ if not df_p.empty:
         (full_df["Rev_YoY"] >= 0.3)
     ].copy()
 
-    st.subheader("🚀 10 倍股爆發雷達 (RS > 90 + 財報 + 趨勢)")
+    st.subheader("10 倍股爆發雷達 (RS > 90 + 財報 + 趨勢)")
     st.dataframe(
         radar_df.style.format({"Price": "{:.2f}", "Rev_YoY": "{:.2%}"}),
         use_container_width=True
     )
 
-    st.subheader("🔥 全市場 RS 強勢排名")
+    st.subheader("全市場 RS 強勢排名")
     st.dataframe(full_df.sort_values("RS Score", ascending=False), use_container_width=True)
 else:
     st.warning("目前資料庫中無足夠資料。")
 ```
-
-# ==============================
-
-# 5. 回測 (Survivor-Bias Free 簡化版)
-
-# ==============================
-
-# 註：真正回測需移動時間軸，此處保留原稿架構供參考
