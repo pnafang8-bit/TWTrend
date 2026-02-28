@@ -4,11 +4,17 @@ import numpy as np
 from sqlalchemy import create_engine
 
 # ====== Supabase PostgreSQL 連線 ======
-DB_URL = "postgresql://postgres:twtrend@db.TWTrend.supabase.co:5432/tw_market"  # Updated with provided password and project ref
+# Updated project ref to lowercase 'twtrend' as Supabase refs are typically lowercase letters.
+# If this still fails, confirm the exact ref in your Supabase dashboard (Project Settings > API).
+DB_URL = "postgresql://postgres:twtrend@db.twtrend.supabase.co:5432/postgres"
 try:
     engine = create_engine(DB_URL)
+    # Test connection with a simple query
+    test_df = pd.read_sql("SELECT 1", engine)
+    st.success("Database connection successful!")
 except Exception as e:
     st.error(f"Database connection failed: {str(e)}")
+    st.info("Please verify your Supabase project ref (should be lowercase), password, and ensure your IP is allowed in Network Restrictions.")
     st.stop()
 
 st.set_page_config(layout="wide", page_title="TWTrend Pro RS Dashboard")
