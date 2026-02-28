@@ -1,0 +1,126 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import datetime
+
+# ==============================
+# 0. 頁面與樣式設定
+# ==============================
+st.set_page_config(layout="wide", page_title="TWTrend Pro RS Dashboard")
+
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; color: white; }
+    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("📈 TWTrend Pro | RS 強勢股 + 爆發股雷達")
+st.info("💡 目前運作於：模擬數據模式 (Mock Mode)。請在修正 DB 連線後換回正式版。")
+
+# ==============================
+# 1. 模擬數據產生器 (快速測試用)
+# ==============================
+@st.cache_data
+def get_mock_data():
+    tickers = [f"{i:04d}" for i in range(1101, 1601)] # 模擬 500 檔股票
+    dates = pd.date_range(end=datetime.date.today(), periods=260)
+    
+    price_data = []
+    for t in tickers:
+        # 隨機產生股價走勢
+        start_price = np.random.uniform(20, 500)
+        volatility = np.random.uniform(0.01, 0.05)
+        # 模擬隨機漫步股價
+        prices = start_price * (1 + np.random.randn(len(dates)) * volatility).cumsum()
+        for i, date in enumerate(dates):
+            price_data.append({"stock_id": t, "trade_date": date, "close": max(prices[i], 1)})
+            
+    df_p = pd.DataFrame(price_data)
+    
+    # 模擬大盤
+    idx_prices = 18000 * (1 + np.random.randn(len(dates)) * 0.005).cumsum()
+    df_i = pd.DataFrame({"trade_date": dates, "close": idx_prices})
+    
+    return df_p, df_i
+
+# ==============================
+# 2. RS 加權計算邏輯
+# ==============================
+def calculate_rs_logic(df_p):
+    results = []
+    for stock_id, group in df_p.groupby("stock_id"):
+        group = group.sort_values("trade_date")
+        curr_p = group.iloc[-1]["close"]
+        prev_p = group.iloc[-2]["close"]
+        
+        # 加權 RS (近3個月兩倍權重)
+        r3 = curr_p / group.iloc[-60]["close"]
+        r6 = curr_p / group.iloc[-120]["close"]
+        r9 = curr_p / group.iloc[-180]["close"]
+        r12 = curr_p / group.iloc[0]["close"]
+        weighted_val = (r3 * 2) + r6 + r9 + r12
+        
+        # 技術指標：MA
+        ma50 = group["close"].rolling(50).mean().iloc[-1]
+        ma200 = group["close"].rolling(200).mean().iloc[-1]
+        
+        results.append({
+            "代號": stock_id,
+            "現在價": round(curr_p, 2),
+            "今日漲跌%": round(((curr_p - prev_p) / prev_p) * 100, 2),
+            "RS加權值": weighted_val,
+            "一年高點": group["close"].max(),
+            "MA50": ma50,
+            "MA200": ma200
+        })
+    
+    res_df = pd.DataFrame(results)
+    res_df["RS評分"] = (res_df["RS加權值"].rank(pct=True) * 100).astype(int)
+    return res_df
+
+# ==============================
+# 3. 畫面顯示與過濾
+# ==============================
+df_p, df_i = get_mock_data()
+full_df = calculate_rs_logic(df_p)
+
+# 篩選爆發股
+def get_labels(row):
+    labels = []
+    if row["RS評分"] >= 90: labels.append("🔥RS強勢")
+    if row["現在價"] >= row["一年高點"] * 0.98: labels.append("🚀創高")
+    if row["現在價"] > row["MA50"] > row["MA200"]: labels.append("📈多頭趨勢")
+    return " | ".join(labels)
+
+full_df["分類標籤"] = full_df.apply(get_labels, axis=1)
+
+# 顏色顯示邏輯 (漲紅跌綠)
+def color_change(val):
+    color = '#ff4b4b' if val > 0 else '#00ff00' if val < 0 else 'white'
+    return f'color: {color}'
+
+# 儀表板指標
+c1, c2, c3 = st.columns(3)
+c1.metric("監控總檔數", f"{len(full_df)} 檔")
+c2.metric("RS強勢股 (RS>90)", f"{len(full_df[full_df['RS評分']>=90])} 檔")
+c3.metric("趨勢噴發中", f"{len(full_df[full_df['今日漲跌%'] > 2])} 檔")
+
+st.subheader("🚀 最終爆發潛力股（RS > 90 + 趨勢向上）")
+radar_df = full_df[full_df["RS評分"] >= 90].sort_values("RS評分", ascending=False).head(10)
+st.table(radar_df[["代號", "現在價", "今日漲跌%", "RS評分", "分類標籤"]])
+
+st.subheader("🔥 全市場 RS 評分排名")
+st.dataframe(
+    full_df[["代號", "現在價", "今日漲跌%", "RS評分", "分類標籤"]]
+    .sort_values("RS評分", ascending=False)
+    .style.applymap(color_change, subset=['今日漲跌%']),
+    use_container_width=True,
+    height=600
+)
+
+# ==============================
+# 下一步
+# ==============================
+st.divider()
+st.write("📈 **想要換成正式數據嗎？** 請在 Supabase 取得正確的 URI 並替換 `DB_URL` 即可連線。")
