@@ -15,8 +15,6 @@ st.set_page_config(layout=“wide”, page_title=“TWTrend Pro RS Dashboard”)
 
 # ====== Supabase PostgreSQL 連線 ======
 
-# FIX: Use URL.create() to safely handle special characters in password [Twtrend@9988]
-
 DB_URL = URL.create(
 drivername=“postgresql”,
 username=“postgres”,
@@ -85,21 +83,21 @@ return pd.DataFrame()
 # ==============================
 
 def calculate_rs_score(price_df, index_df):
-# 計算加權漲幅：(3m*2 + 6m + 9m + 12m)
 results = []
 for stock_id, group in price_df.groupby(“stock_id”):
 group = group.sort_values(“trade_date”)
-if len(group) < 240: continue
+if len(group) < 240:
+continue
 
 ```
     curr_p = group.iloc[-1]["close"]
-    r3 = curr_p / group.iloc[-60]["close"]
-    r6 = curr_p / group.iloc[-120]["close"]
-    r9 = curr_p / group.iloc[-180]["close"]
+    r3  = curr_p / group.iloc[-60]["close"]
+    r6  = curr_p / group.iloc[-120]["close"]
+    r9  = curr_p / group.iloc[-180]["close"]
     r12 = curr_p / group.iloc[0]["close"]
-    
+
     weighted_ret = (r3 * 2) + r6 + r9 + r12
-    
+
     results.append({
         "Stock": stock_id,
         "Price": curr_p,
@@ -108,9 +106,9 @@ if len(group) < 240: continue
     })
 
 rs_df = pd.DataFrame(results)
-if rs_df.empty: return rs_df
+if rs_df.empty:
+    return rs_df
 
-# 計算百分位排名 (0-100)
 rs_df["RS Score"] = (rs_df["Weighted_Ret"].rank(pct=True) * 100).astype(int)
 return rs_df
 ```
@@ -125,9 +123,10 @@ def apply_filters(rs_df, price_df):
 # A. 爆發股技術模板 (Minervini Setup)
 tech_results = []
 for stock_id, group in price_df.groupby(“stock_id”):
-if len(group) < 200: continue
+if len(group) < 200:
+continue
 data = group.sort_values(“trade_date”)
-ma50 = data[“close”].rolling(50).mean().iloc[-1]
+ma50  = data[“close”].rolling(50).mean().iloc[-1]
 ma150 = data[“close”].rolling(150).mean().iloc[-1]
 ma200 = data[“close”].rolling(200).mean().iloc[-1]
 
@@ -154,7 +153,6 @@ except:
 try:
     inst_query = "SELECT stock_id, foreign_buy, trust_buy FROM institutional_flow ORDER BY trade_date DESC LIMIT 5000"
     inst = pd.read_sql(inst_query, engine)
-    # 簡化邏輯：近 3 日買超合計 > 0
     inst_sum = inst.groupby("stock_id").head(3).groupby("stock_id").sum()
     inst_sum["Inst_Sync"] = (inst_sum["foreign_buy"] > 0) & (inst_sum["trust_buy"] > 0)
     rs_df = rs_df.merge(inst_sum[["Inst_Sync"]], left_on="Stock", right_index=True, how="left")
@@ -172,8 +170,6 @@ return rs_df
 
 st.title(“📈 TWTrend Pro | RS 強勢股雷達”)
 
-# 讀取並計算
-
 with st.spinner(“正在從雲端計算全市場數據…”):
 df_p = load_price_data()
 df_i = load_index_data()
@@ -182,16 +178,14 @@ df_i = load_index_data()
 if not df_p.empty:
     rs_base = calculate_rs_score(df_p, df_i)
     full_df = apply_filters(rs_base, df_p)
-    
-    # 5. 儀表板視覺化
+
     col1, col2, col3 = st.columns(3)
     strong_count = len(full_df[full_df["RS Score"] >= 90])
     col1.metric("RS > 90 檔數", f"{strong_count} 檔")
-    
-    # 最終爆發股過濾
+
     radar_df = full_df[
-        (full_df["RS Score"] >= 90) & 
-        (full_df["Explosive Setup"] == True) & 
+        (full_df["RS Score"] >= 90) &
+        (full_df["Explosive Setup"] == True) &
         (full_df["Rev_YoY"] >= 0.3)
     ].copy()
 
