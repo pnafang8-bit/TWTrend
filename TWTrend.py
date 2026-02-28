@@ -8,25 +8,25 @@ import pytz
 # 時區與頁面設定
 tw_tz = pytz.timezone('Asia/Taipei')
 now_tw = datetime.now(tw_tz)
-st.set_page_config(layout="wide", page_title="TWTrend | 強勢股篩選器")
+st.set_page_config(layout="wide", page_title="TWTrend | 台股官方中文篩選器")
 
-# 快取股票中文名稱
+# 強制抓取台灣交易所中文名稱
 @st.cache_data(ttl=86400)
-def get_stock_name_ch(ticker):
+def get_tw_stock_name(ticker):
     try:
+        # 針對台股，yf.Ticker 的 shortName 通常就是交易所的中文簡稱
         t = yf.Ticker(ticker)
-        # yfinance 的 shortName 在台股通常會回傳中文名稱
-        name = t.info.get('shortName') or t.info.get('longName') or ticker
+        info = t.info
+        # 優先順序：短名稱(中文) -> 長名稱 -> 代號
+        name = info.get('shortName') or info.get('longName') or ticker
+        # 移除名稱中可能存在的 "Corporation" 或 "Co., Ltd." 等英文（若抓到的是英文時）
         return name
     except:
         return ticker
 
 @st.cache_data(ttl=3600)
 def fetch_bulk_data(tickers, days=730):
-    # 下載數據並處理多重索引
     df = yf.download(tickers, start=(now_tw - timedelta(days=days)).strftime('%Y-%m-%d'), auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex) and len(tickers.split(',')) == 1:
-        df.columns = df.columns.get_level_values(0)
     return df
 
 def analyze_stock(ticker, full_df, market_close):
@@ -47,13 +47,13 @@ def analyze_stock(ticker, full_df, market_close):
         ma150 = ta.sma(close_s, length=150)
         ma200 = ta.sma(close_s, length=200)
         
-        # RS 相對強度數值計算 (個股表現 / 大盤表現)
-        # 這裡定義 RS 數值為：(個股現價/個股一年前價) / (大盤現價/大盤一年前價) * 100
+        # RS 相對強度數值計算 (個股 vs 大盤)
+        # 公式：$$RS = \frac{個股一年表現}{大盤一年表現} \times 100$$
         stock_perf = close_s.iloc[-1] / close_s.iloc[-252]
-        mkt_perf = market_close.iloc[-1] / market_close.loc[stock_df.index[0]] # 對應時間點
+        mkt_perf = market_close.iloc[-1] / market_close.iloc[-252]
         rs_value = round((stock_perf / mkt_perf) * 100, 2)
         
-        # 用於 C8 判斷的 RS Line (短期趨勢)
+        # 短期 RS 趨勢 (用於 C8 判斷)
         rs_line = (close_s / market_close.loc[stock_df.index]) * 100
         
         last_p = float(close_s.iloc[-1])
@@ -79,18 +79,18 @@ def analyze_stock(ticker, full_df, market_close):
         ]
         
         score = sum(cond)
-        if score == 0: return None
+        if score == 0: return None # 排除得分為 0 的股票
 
         return {
             "總得分": score,
             "代號": ticker,
-            "名稱": get_stock_name_ch(ticker),
+            "股票名稱": get_tw_stock_name(ticker),
             "收盤價": round(last_p, 2),
             "RS 相對強度": rs_value,
             "C1:價>長均": "✅" if cond[0] else "❌",
-            "C2:均線多排": "✅" if cond[1] else "❌",
-            "C3:200MA↑": "✅" if cond[2] else "❌",
-            "C4:中長多排": "✅" if cond[3] else "❌",
+            "C2:長均多排": "✅" if cond[1] else "❌",
+            "C3:200MA向上": "✅" if cond[2] else "❌",
+            "C4:均線全多排": "✅" if cond[3] else "❌",
             "C5:價>50MA": "✅" if cond[4] else "❌",
             "C6:底反彈30%": "✅" if cond[5] else "❌",
             "C7:近高25%": "✅" if cond[6] else "❌",
@@ -100,68 +100,69 @@ def analyze_stock(ticker, full_df, market_close):
         return None
 
 # --- 表格樣式 ---
-def style_table(val):
+def style_fn(val):
     if val == '✅': return 'color: #EB3323; font-weight: bold'
     if val == '❌': return 'color: #999999'
     return ''
 
-def highlight_score(val):
+def score_bg(val):
     if isinstance(val, int):
         if val >= 7: return 'background-color: #FFCDD2; color: #B71C1C; font-weight: bold'
         if val >= 5: return 'background-color: #FFF9C4; color: #F57F17'
     return ''
 
-# --- UI ---
-st.title("🚀 TWTrend 台股強勢股掃描儀")
+# --- UI 介面 ---
+st.title("📊 TWTrend 強勢股排行榜 (中文版)")
 st.sidebar.header("掃描設定")
 
-# 範例股票
-example_list = "2330.TW, 2317.TW, 2454.TW, 2603.TW, 2382.TW, 3231.TW, 1513.TW, 1519.TW, 6806.TW, 3017.TW, 3324.TW"
-input_str = st.sidebar.text_area("請輸入台股代碼 (以逗號隔開)", example_list)
+# 預設一些熱門股測試
+default_list = "2330.TW, 2317.TW, 2454.TW, 2603.TW, 2382.TW, 3231.TW, 1513.TW, 1519.TW, 3017.TW, 6806.TW"
+input_str = st.sidebar.text_area("輸入台股代碼 (逗號隔開)", default_list)
 ticker_list = [t.strip().upper() for t in input_str.split(",") if t.strip()]
 
-if st.sidebar.button("開始掃描分析"):
+if st.sidebar.button("開始掃描並排序"):
     try:
-        with st.spinner('正在分析市場趨勢與抓取中文名稱...'):
+        with st.spinner('正在獲取證交所中文名稱與計算指標...'):
             # 大盤數據
-            m_df = yf.download("^TWII", start=(now_tw - timedelta(days=750)).strftime('%Y-%m-%d'), auto_adjust=True)
-            m_close = m_df['Close'].squeeze()
+            m_df = yf.download("^TWII", start=(now_tw - timedelta(days=730)).strftime('%Y-%m-%d'), auto_adjust=True)
+            market_close = m_df['Close'].squeeze()
             
             # 個股數據
             all_data = fetch_bulk_data(input_str)
             
             results = []
             for ticker in ticker_list:
-                res = analyze_stock(ticker, all_data, m_close)
+                res = analyze_stock(ticker, all_data, market_close)
                 if res: results.append(res)
             
             if not results:
-                st.warning("⚠️ 所選名單中目前沒有股票符合趨勢模板 (得分皆為 0)。")
+                st.warning("⚠️ 名單中沒有股票符合任何一項趨勢條件 (得分皆為 0)。")
             else:
                 df_res = pd.DataFrame(results)
-                # 排序：總得分 > RS 相對強度
+                
+                # 排序邏輯：總得分(由大到小) -> RS強度(由大到小)
                 df_res = df_res.sort_values(by=["總得分", "RS 相對強度"], ascending=[False, False])
                 
-                st.success(f"✅ 掃描完成！共找到 {len(df_res)} 檔具備動能之個股。")
+                st.success(f"✅ 掃描完成！共列出 {len(df_res)} 檔強勢候選股。")
                 
-                # 套用樣式
-                styled_df = df_res.style.map(style_table).map(highlight_score, subset=['總得分'])
-                
+                # 顯示表格
+                styled_df = df_res.style.map(style_fn).map(score_bg, subset=['總得分'])
                 st.dataframe(styled_df, use_container_width=True, height=600)
                 
                 # 下載
                 csv = df_res.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("匯出分析報表", csv, f"TrendScan_{now_tw.strftime('%Y%m%d')}.csv", "text/csv")
+                st.download_button("匯出 Excel (CSV)", csv, "Stock_Trend_Report.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"分析發生錯誤：{e}")
+        st.error(f"分析失敗，錯誤訊息：{e}")
 else:
-    st.info("👈 請在左側輸入自選股代碼，點擊按鈕開始分析。")
+    st.info("👈 請在側邊欄輸入股票代碼並點擊執行。")
 
-with st.expander("📊 指標定義說明"):
+with st.expander("📌 指標與 RS 公式說明"):
     st.markdown("""
-    1. **RS 相對強度**: 計算公式為 $$(Stock_{Return} / Market_{Return}) \times 100$$。數值 > 100 表示表現優於大盤，數值越高動能越強。
-    2. **總得分**: 滿分 8 分，採用 Mark Minervini 的趨勢模板條件。
-    3. **中文名稱**: 系統自動從數據源抓取該代號對應的中文簡稱。
-    4. **C1~C8**: 分別代表價格位置、均線排列、52週高低點距離與相對強度趨勢。
+    - **RS 相對強度**: 計算公式為 $$RS = \frac{Price_{Now} / Price_{1Y\_Ago}}{Market_{Now} / Market_{1Y\_Ago}} \times 100$$。
+        - 數值 **> 100**: 代表表現優於加權指數。
+        - 數值 **< 100**: 代表表現落後加權指數。
+    - **排序規則**: 系統會優先將 **總得分**（滿分 8 分）最高的排在前面；若得分相同，則 **RS 相對強度** 較高者排在前。
+    - **中文名稱**: 強制從證交所資料庫抓取中文簡稱，若依然顯示英文，請檢查代號是否正確（如：2330.TW）。
     """)
