@@ -16,25 +16,39 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("📈 TWTrend Pro | RS 強勢股 + 爆發股雷達")
-st.info("💡 目前運作於：模擬數據模式 (Mock Mode)。請在修正 DB 連線後換回正式版。")
+st.info("💡 目前運作於：模擬數據模式 (Mock Mode)。已加入中文股票名稱對照。")
 
 # ==============================
-# 1. 模擬數據產生器 (快速測試用)
+# 1. 模擬數據與中文名產生器
 # ==============================
 @st.cache_data
 def get_mock_data():
-    tickers = [f"{i:04d}" for i in range(1101, 1601)] # 模擬 500 檔股票
+    # 建立中文對照表
+    tw_names = {
+        "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電", 
+        "2382": "廣達", "2301": "光寶科", "3231": "緯創", "2376": "技嘉", 
+        "2603": "長榮", "2609": "陽明", "2881": "富邦金", "2882": "國泰金",
+        "1101": "台泥", "1301": "台塑", "2002": "中鋼", "2412": "中華電"
+    }
+    
+    # 模擬 500 檔股票代號
+    tickers = [f"{i}" for i in range(1101, 1601)] 
     dates = pd.date_range(end=datetime.date.today(), periods=260)
     
     price_data = []
     for t in tickers:
-        # 隨機產生股價走勢
+        name = tw_names.get(t, f"模擬股-{t}")
         start_price = np.random.uniform(20, 500)
         volatility = np.random.uniform(0.01, 0.05)
-        # 模擬隨機漫步股價
+        # 模擬隨機漫步走勢
         prices = start_price * (1 + np.random.randn(len(dates)) * volatility).cumsum()
         for i, date in enumerate(dates):
-            price_data.append({"stock_id": t, "trade_date": date, "close": max(prices[i], 1)})
+            price_data.append({
+                "stock_id": t, 
+                "name": name, 
+                "trade_date": date, 
+                "close": max(prices[i], 1)
+            })
             
     df_p = pd.DataFrame(price_data)
     
@@ -49,7 +63,7 @@ def get_mock_data():
 # ==============================
 def calculate_rs_logic(df_p):
     results = []
-    for stock_id, group in df_p.groupby("stock_id"):
+    for (stock_id, name), group in df_p.groupby(["stock_id", "name"]):
         group = group.sort_values("trade_date")
         curr_p = group.iloc[-1]["close"]
         prev_p = group.iloc[-2]["close"]
@@ -67,6 +81,7 @@ def calculate_rs_logic(df_p):
         
         results.append({
             "代號": stock_id,
+            "名稱": name,
             "現在價": round(curr_p, 2),
             "今日漲跌%": round(((curr_p - prev_p) / prev_p) * 100, 2),
             "RS加權值": weighted_val,
@@ -106,21 +121,15 @@ c1.metric("監控總檔數", f"{len(full_df)} 檔")
 c2.metric("RS強勢股 (RS>90)", f"{len(full_df[full_df['RS評分']>=90])} 檔")
 c3.metric("趨勢噴發中", f"{len(full_df[full_df['今日漲跌%'] > 2])} 檔")
 
-st.subheader("🚀 最終爆發潛力股（RS > 90 + 趨勢向上）")
+st.subheader("🚀 最終爆發潛力股 (RS > 90 + 趨勢向上)")
 radar_df = full_df[full_df["RS評分"] >= 90].sort_values("RS評分", ascending=False).head(10)
-st.table(radar_df[["代號", "現在價", "今日漲跌%", "RS評分", "分類標籤"]])
+st.table(radar_df[["代號", "名稱", "現在價", "今日漲跌%", "RS評分", "分類標籤"]])
 
 st.subheader("🔥 全市場 RS 評分排名")
 st.dataframe(
-    full_df[["代號", "現在價", "今日漲跌%", "RS評分", "分類標籤"]]
+    full_df[["代號", "名稱", "現在價", "今日漲跌%", "RS評分", "分類標籤"]]
     .sort_values("RS評分", ascending=False)
     .style.applymap(color_change, subset=['今日漲跌%']),
     use_container_width=True,
     height=600
 )
-
-# ==============================
-# 下一步
-# ==============================
-st.divider()
-st.write("📈 **想要換成正式數據嗎？** 請在 Supabase 取得正確的 URI 並替換 `DB_URL` 即可連線。")
