@@ -19,7 +19,7 @@ st.set_page_config(layout="wide", page_title="TWTrend Pro RS Dashboard")
 DB_URL = URL.create(
     drivername="postgresql",
     username="postgres",
-    password="Twtrend@9988", # 如果密碼包含特殊字元，sqlalchemy 會自動處理
+    password="［Twtrend@9988］", # 如果密碼包含特殊字元，sqlalchemy 會自動處理
     host="db.zuwlrboozuwdkfevlces.supabase.co",
     port=5432,
     database="postgres"
