@@ -2,119 +2,156 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import pytz
 
-# 時區設定
+# 時區與頁面設定
 tw_tz = pytz.timezone('Asia/Taipei')
 now_tw = datetime.now(tw_tz)
+st.set_page_config(layout="wide", page_title="TWTrend | 強勢股篩選器")
 
-st.set_page_config(layout="wide", page_title="TWTrend | 台股趨勢修正版")
-
-# 配色
-UP_COLOR = '#EB3323'
-DOWN_COLOR = '#26A69A'
+# 快取股票名稱
+@st.cache_data(ttl=86400)
+def get_stock_name(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        name = t.info.get('shortName') or t.info.get('longName') or ticker
+        return name
+    except:
+        return ticker
 
 @st.cache_data(ttl=3600)
-def fetch_auto_data(ticker):
-    # 下載數據
-    df = yf.download(ticker, start=(now_tw - timedelta(days=730)).strftime('%Y-%m-%d'), auto_adjust=True)
-    # 關鍵修正：如果是多重索引，只取第一層名稱，避免欄位歧義
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+def fetch_bulk_data(tickers, days=730):
+    df = yf.download(tickers, start=(now_tw - timedelta(days=days)).strftime('%Y-%m-%d'), auto_adjust=True)
     return df
 
-def calculate_rs(stock_close, market_close):
-    # 確保兩者都是 Series 且長度一致
-    rs_raw = stock_close / market_close
-    rs_normalized = (rs_raw / rs_raw.iloc[0]) * 100
-    return rs_normalized
-
-st.title("🚀 TWTrend 台股自動化分析儀表板")
-st.caption(f"📅 數據同步時間：{now_tw.strftime('%Y-%m-%d %H:%M:%S')}")
-
-stock_id = st.sidebar.text_input("輸入台股代碼 (例如: 2330.TW)", "2330.TW")
-market_id = "^TWII"
-
-try:
-    with st.spinner('正在處理數據...'):
-        df = fetch_auto_data(stock_id)
-        m_df = fetch_auto_data(market_id)
+def analyze_stock(ticker, full_df, market_close):
+    try:
+        # 處理多重索引
+        if isinstance(full_df.columns, pd.MultiIndex):
+            stock_df = full_df.xs(ticker, axis=1, level=1).dropna()
+        else:
+            stock_df = full_df.dropna()
+            
+        if len(stock_df) < 250: return None
         
-        common_idx = df.index.intersection(m_df.index)
-        df = df.loc[common_idx].copy()
-        m_df = m_df.loc[common_idx].copy()
+        close_s = stock_df['Close']
+        high_s = stock_df['High']
+        low_s = stock_df['Low']
+        
+        # 指標計算
+        ma50 = ta.sma(close_s, length=50)
+        ma150 = ta.sma(close_s, length=150)
+        ma200 = ta.sma(close_s, length=200)
+        rs_line = (close_s / market_close.loc[stock_df.index]) * 100
+        h52 = high_s.rolling(window=252).max()
+        l52 = low_s.rolling(window=252).min()
+        
+        # 取得數值
+        last_p = float(close_s.iloc[-1])
+        m50 = float(ma50.iloc[-1])
+        m150 = float(ma150.iloc[-1])
+        m200 = float(ma200.iloc[-1])
+        m200_prev = float(ma200.iloc[-22])
+        rs_now = float(rs_line.iloc[-1])
+        rs_prev = float(rs_line.iloc[-22])
+        curr_h52 = float(h52.iloc[-1])
+        curr_l52 = float(l52.iloc[-1])
 
-        # 強制轉換為單一 Series 並移除可能的 NaN
-        close_s = df['Close'].squeeze()
-        high_s = df['High'].squeeze()
-        low_s = df['Low'].squeeze()
-        m_close_s = m_df['Close'].squeeze()
+        # 8 項條件
+        cond = [
+            last_p > m150 and last_p > m200,
+            m150 > m200,
+            m200 > m200_prev,
+            m50 > m150 and m50 > m200,
+            last_p > m50,
+            last_p >= (curr_l52 * 1.30),
+            last_p >= (curr_h52 * 0.75),
+            rs_now > rs_prev
+        ]
+        
+        score = sum(cond)
+        
+        # 如果得分為 0，直接回傳 None，後續會被過濾掉
+        if score == 0:
+            return None
 
-        # 計算指標
-        df['MA50'] = ta.sma(close_s, length=50)
-        df['MA150'] = ta.sma(close_s, length=150)
-        df['MA200'] = ta.sma(close_s, length=200)
-        df['RS_Line'] = calculate_rs(close_s, m_close_s)
-        df['H_52W'] = high_s.rolling(window=252).max()
-        df['L_52W'] = low_s.rolling(window=252).min()
+        return {
+            "總得分": score,
+            "代號": ticker,
+            "名稱": get_stock_name(ticker),
+            "收盤價": round(last_p, 2),
+            "C1:價>長均": "✅" if cond[0] else "❌",
+            "C2:長均多排": "✅" if cond[1] else "❌",
+            "C3:200MA向上": "✅" if cond[2] else "❌",
+            "C4:均線全多排": "✅" if cond[3] else "❌",
+            "C5:價>50MA": "✅" if cond[4] else "❌",
+            "C6:底反彈30%": "✅" if cond[5] else "❌",
+            "C7:近高25%": "✅" if cond[6] else "❌",
+            "C8:RS趨勢": "✅" if cond[7] else "❌"
+        }
+    except:
+        return None
 
-    # --- 取得最後一天的數值 (確保轉換為純數字 float) ---
-    last_p = float(close_s.iloc[-1])
-    prev_p = float(close_s.iloc[-2])
-    ma50_last = float(df['MA50'].iloc[-1])
-    ma150_last = float(df['MA150'].iloc[-1])
-    ma200_last = float(df['MA200'].iloc[-1])
-    ma200_prev = float(df['MA200'].iloc[-22]) # 一個月前
-    rs_last = float(df['RS_Line'].iloc[-1])
-    rs_prev = float(df['RS_Line'].iloc[-22])
-    h52 = float(df['H_52W'].iloc[-1])
-    l52 = float(df['L_52W'].iloc[-1])
+# --- UI 介面 ---
+st.title("📊 TWTrend 強勢股篩選器 (排除 0 分股)")
+st.sidebar.header("篩選設定")
 
-    # --- 頂部摘要 ---
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("最新收盤價", f"{last_p:.2f}", f"{((last_p-prev_p)/prev_p)*100:.2f}%")
-    c2.metric("RS 強度指數", f"{rs_last:.2f}")
-    c3.metric("52週高點距離", f"{((last_p/h52)-1)*100:.1f}%")
-    c4.metric("成交量 (張)", f"{int(df['Volume'].iloc[-1].squeeze()/1000):,}")
+default_tickers = "2330.TW, 2317.TW, 2454.TW, 2603.TW, 2382.TW, 3231.TW, 1513.TW, 1519.TW, 1504.TW, 2303.TW, 3037.TW, 2376.TW"
+input_str = st.sidebar.text_area("輸入台股代碼 (逗號隔開)", default_tickers)
+ticker_list = [t.strip().upper() for t in input_str.split(",") if t.strip()]
 
-    # --- 圖表 ---
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.2, 0.3])
-    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'].squeeze(), high=high_s, low=low_s, close=close_s,
-                                increasing_line_color=UP_COLOR, decreasing_line_color=DOWN_COLOR, name="K線"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA50'], name="MA50", line=dict(color='#FF9800')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA200'], name="MA200", line=dict(color='#F44336')), row=1, col=1)
-    
-    v_colors = [UP_COLOR if close_s.iloc[i] >= df['Open'].squeeze().iloc[i] else DOWN_COLOR for i in range(len(df))]
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'].squeeze(), marker_color=v_colors, name="成交量"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['RS_Line'], line=dict(color='#2196F3', width=2), name="RS"), row=3, col=1)
-    fig.update_layout(height=800, template='plotly_dark', xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+if st.sidebar.button("開始篩選"):
+    try:
+        with st.spinner('分析中，請稍候...'):
+            # 大盤數據
+            m_df = yf.download("^TWII", start=(now_tw - timedelta(days=730)).strftime('%Y-%m-%d'), auto_adjust=True)
+            market_close = m_df['Close'].squeeze()
+            
+            # 批次下載
+            all_data = fetch_bulk_data(ticker_list)
+            
+            results = []
+            for ticker in ticker_list:
+                res = analyze_stock(ticker, all_data, market_close)
+                if res: # 只有非 None (得分 > 0) 的才會加入
+                    results.append(res)
+            
+            if not results:
+                st.warning("⚠️ 掃描完成，但在輸入的名單中沒有任何股票符合至少一項趨勢條件。")
+            else:
+                df_result = pd.DataFrame(results)
+                
+                # 排序：得分(大到小) -> 代號(小到大)
+                df_result = df_result.sort_values(by=["總得分", "代號"], ascending=[False, True])
 
-    # --- 檢核表 (Minervini 趨勢模板) ---
-    st.subheader("🏁 趨勢模板篩選 (Mark Minervini)")
-    
-    # 這裡的所有比較現在都是針對單一數值 (float)，不會再報錯
-    results = [
-        last_p > ma150_last and last_p > ma200_last,
-        ma150_last > ma200_last,
-        ma200_last > ma200_prev,
-        ma50_last > ma150_last and ma50_last > ma200_last,
-        last_p > ma50_last,
-        last_p >= (l52 * 1.30),
-        last_p >= (h52 * 0.75),
-        rs_last > rs_prev
-    ]
-    
-    labels = ["價格 > $$MA_{150}/200$$", "$$MA_{150} > MA_{200}$$", "$$MA_{200}$$ 向上趨勢", "$$MA_{50} > MA_{150}/200$$", 
-              "價格 > $$MA_{50}$$", "較 52週低點反彈 > 30%", "距離 52週高點 25% 以內", "RS 指標一月內呈上升趨勢"]
+                st.success(f"✅ 掃描完成！已列出 {len(df_result)} 檔具有動能的股票（已隱藏 0 分股票）。")
 
-    cols = st.columns(2)
-    for i, (label, res) in enumerate(zip(labels, results)):
-        with cols[i % 2]:
-            st.info(f"{'✅' if res else '❌'} {label}")
+                # 顯示表格
+                st.dataframe(
+                    df_result.style.applymap(
+                        lambda x: 'color: #EB3323; font-weight: bold' if x == '✅' else 'color: #999999' if x == '❌' else ''
+                    ).background_gradient(subset=['總得分'], cmap='YlOrRd'),
+                    use_container_width=True,
+                    height=600
+                )
 
-except Exception as e:
-    st.error(f"發生錯誤：{e}")
+                # 下載按鈕
+                csv = df_result.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("匯出結果", csv, "Trend_Score_List.csv", "text/csv")
+
+    except Exception as e:
+        st.error(f"錯誤：{e}")
+else:
+    st.info("👈 請在左側輸入代碼並點擊「開始篩選」。")
+
+with st.expander("📌 評分指標說明"):
+    st.markdown("""
+    本表僅顯示 **得分 > 0** 的股票。各項條件公式如下：
+    - **C1 & C2 (長期趨勢)**: $$Price > MA_{150}/200$$ 且 $$MA_{150} > MA_{200}$$
+    - **C3 (均線斜率)**: $$MA_{200}$$ 正在向上
+    - **C4 & C5 (中期趨勢)**: $$MA_{50}$$ 排列正確且價格在其上方
+    - **C6 (超跌反彈)**: $$Price \ge (Low_{52W} \times 1.30)$$
+    - **C7 (強勢整理)**: $$Price \ge (High_{52W} \times 0.75)$$
+    - **C8 (相對強度)**: 當前 $$RS$$ 指標優於一個月前
+    """)
