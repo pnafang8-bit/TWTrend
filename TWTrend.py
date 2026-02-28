@@ -27,7 +27,6 @@ def fetch_bulk_data(tickers, days=730):
 
 def analyze_stock(ticker, full_df, market_close):
     try:
-        # 處理多重索引
         if isinstance(full_df.columns, pd.MultiIndex):
             stock_df = full_df.xs(ticker, axis=1, level=1).dropna()
         else:
@@ -47,7 +46,6 @@ def analyze_stock(ticker, full_df, market_close):
         h52 = high_s.rolling(window=252).max()
         l52 = low_s.rolling(window=252).min()
         
-        # 取得數值
         last_p = float(close_s.iloc[-1])
         m50 = float(ma50.iloc[-1])
         m150 = float(ma150.iloc[-1])
@@ -71,10 +69,7 @@ def analyze_stock(ticker, full_df, market_close):
         ]
         
         score = sum(cond)
-        
-        # 如果得分為 0，直接回傳 None，後續會被過濾掉
-        if score == 0:
-            return None
+        if score == 0: return None
 
         return {
             "總得分": score,
@@ -93,65 +88,60 @@ def analyze_stock(ticker, full_df, market_close):
     except:
         return None
 
+# --- 表格樣式函數 (取代 matplotlib) ---
+def style_logic(val):
+    if val == '✅': return 'color: #EB3323; font-weight: bold'
+    if val == '❌': return 'color: #999999'
+    return ''
+
+def score_color(val):
+    # 根據分數給予不同的背景色 (Excel 風格)
+    if val >= 7: return 'background-color: #FFCDD2; color: #B71C1C; font-weight: bold' # 強勢紅
+    if val >= 5: return 'background-color: #FFF9C4; color: #F57F17' # 警告黃
+    return ''
+
 # --- UI 介面 ---
-st.title("📊 TWTrend 強勢股篩選器 (排除 0 分股)")
+st.title("📊 TWTrend 強勢股篩選器")
 st.sidebar.header("篩選設定")
 
-default_tickers = "2330.TW, 2317.TW, 2454.TW, 2603.TW, 2382.TW, 3231.TW, 1513.TW, 1519.TW, 1504.TW, 2303.TW, 3037.TW, 2376.TW"
+default_tickers = "2330.TW, 2317.TW, 2454.TW, 2603.TW, 2382.TW, 3231.TW, 1513.TW, 1519.TW, 1504.TW, 2303.TW"
 input_str = st.sidebar.text_area("輸入台股代碼 (逗號隔開)", default_tickers)
 ticker_list = [t.strip().upper() for t in input_str.split(",") if t.strip()]
 
 if st.sidebar.button("開始篩選"):
     try:
-        with st.spinner('分析中，請稍候...'):
-            # 大盤數據
+        with st.spinner('數據計算中...'):
             m_df = yf.download("^TWII", start=(now_tw - timedelta(days=730)).strftime('%Y-%m-%d'), auto_adjust=True)
             market_close = m_df['Close'].squeeze()
-            
-            # 批次下載
             all_data = fetch_bulk_data(ticker_list)
             
             results = []
             for ticker in ticker_list:
                 res = analyze_stock(ticker, all_data, market_close)
-                if res: # 只有非 None (得分 > 0) 的才會加入
-                    results.append(res)
+                if res: results.append(res)
             
             if not results:
-                st.warning("⚠️ 掃描完成，但在輸入的名單中沒有任何股票符合至少一項趨勢條件。")
+                st.warning("⚠️ 沒有股票得分超過 0 分。")
             else:
                 df_result = pd.DataFrame(results)
-                
-                # 排序：得分(大到小) -> 代號(小到大)
                 df_result = df_result.sort_values(by=["總得分", "代號"], ascending=[False, True])
 
-                st.success(f"✅ 掃描完成！已列出 {len(df_result)} 檔具有動能的股票（已隱藏 0 分股票）。")
+                st.success(f"✅ 篩選完成！顯示 {len(df_result)} 檔有得分的股票。")
 
-                # 顯示表格
-                st.dataframe(
-                    df_result.style.applymap(
-                        lambda x: 'color: #EB3323; font-weight: bold' if x == '✅' else 'color: #999999' if x == '❌' else ''
-                    ).background_gradient(subset=['總得分'], cmap='YlOrRd'),
-                    use_container_width=True,
-                    height=600
-                )
+                # 套用自定義樣式 (不再依賴 matplotlib)
+                styled_df = df_result.style.map(style_logic).map(score_color, subset=['總得分'])
 
-                # 下載按鈕
+                st.dataframe(styled_df, use_container_width=True, height=600)
+
                 csv = df_result.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("匯出結果", csv, "Trend_Score_List.csv", "text/csv")
+                st.download_button("匯出結果", csv, "Trend_Scan.csv", "text/csv")
 
     except Exception as e:
         st.error(f"錯誤：{e}")
-else:
-    st.info("👈 請在左側輸入代碼並點擊「開始篩選」。")
 
 with st.expander("📌 評分指標說明"):
     st.markdown("""
-    本表僅顯示 **得分 > 0** 的股票。各項條件公式如下：
-    - **C1 & C2 (長期趨勢)**: $$Price > MA_{150}/200$$ 且 $$MA_{150} > MA_{200}$$
-    - **C3 (均線斜率)**: $$MA_{200}$$ 正在向上
-    - **C4 & C5 (中期趨勢)**: $$MA_{50}$$ 排列正確且價格在其上方
-    - **C6 (超跌反彈)**: $$Price \ge (Low_{52W} \times 1.30)$$
-    - **C7 (強勢整理)**: $$Price \ge (High_{52W} \times 0.75)$$
-    - **C8 (相對強度)**: 當前 $$RS$$ 指標優於一個月前
+    - **8 分**: 極度強勢股，完全符合 Minervini 趨勢模板。
+    - **5-7 分**: 趨勢正在形成中或處於整理期。
+    - **0 分**: 已被系統自動過濾（不顯示）。
     """)
