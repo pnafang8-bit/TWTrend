@@ -13,11 +13,29 @@ import time
 tw_tz = pytz.timezone('Asia/Taipei')
 now_tw = datetime.now(tw_tz)
 
-st.set_page_config(layout="wide", page_title="TWTrend | 多週期 RS 強勢股分析")
-st.title("💹 TWTrend 強勢股分析 (TWSE 官方資料版)")
+st.set_page_config(layout="wide", page_title="TWTrend | 全市場 RS 強勢股")
+st.title("💹 TWTrend 全市場 RS 強勢股掃描 (TWSE + TPEx)")
 
 # ---------------------------
-# TWSE API 抓取函式
+# 取得上市股票清單
+# ---------------------------
+def get_twse_list():
+    url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json"
+    r = requests.get(url)
+    js = r.json()
+    df = pd.DataFrame(js['data'], columns=js['fields'])
+    return df['證券代號'].tolist()
+
+# ---------------------------
+# 取得上櫃股票清單
+# ---------------------------
+def get_tpex_list():
+    url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+    df = pd.read_json(url)
+    return df['SecuritiesCompanyCode'].tolist()
+
+# ---------------------------
+# 抓大盤 (加權指數)
 # ---------------------------
 def fetch_twii_data(days=750):
     closes = []
@@ -33,12 +51,14 @@ def fetch_twii_data(days=750):
                 closes.append(idx_close)
         except:
             continue
-        time.sleep(0.2)
+        time.sleep(0.1)
 
     return pd.Series(closes)
 
-
-def fetch_stock_data_twse(stock_id, days=750):
+# ---------------------------
+# 抓個股歷史資料
+# ---------------------------
+def fetch_stock_data(stock_id, days=750):
     dfs = []
     months = pd.date_range(end=now_tw, periods=int(days/30)+2, freq='M')
 
@@ -59,7 +79,7 @@ def fetch_stock_data_twse(stock_id, days=750):
                 dfs.append(df[['Date','Close','High','Low']])
         except:
             continue
-        time.sleep(0.2)
+        time.sleep(0.1)
 
     if dfs:
         out = pd.concat(dfs).sort_values('Date').drop_duplicates('Date')
@@ -67,22 +87,12 @@ def fetch_stock_data_twse(stock_id, days=750):
         return out.tail(750)
     return None
 
-
-def fetch_bulk_data(tickers, days=750):
-    data_dict = {}
-    for t in tickers:
-        sid = t.replace('.TW','').strip()
-        df = fetch_stock_data_twse(sid, days)
-        if df is not None:
-            data_dict[t] = df
-    return data_dict
-
 # ---------------------------
-# 分析邏輯
+# RS 計算 + Minervini 評分
 # ---------------------------
-def analyze_stock(ticker, full_df, market_close):
+def analyze_stock(stock_id, market_close):
     try:
-        stock_df = full_df.get(ticker)
+        stock_df = fetch_stock_data(stock_id)
         if stock_df is None or len(stock_df) < 250:
             return None
 
@@ -132,8 +142,8 @@ def analyze_stock(ticker, full_df, market_close):
             return None
 
         return {
+            "代號": stock_id,
             "總得分": score,
-            "代號": ticker.replace('.TW',''),
             "現價": round(last_p, 2),
             "季報酬(%)": q_return,
             "RS年強度": rs_1y,
@@ -143,39 +153,30 @@ def analyze_stock(ticker, full_df, market_close):
         return None
 
 # ---------------------------
-# UI
+# 主按鈕：全市場掃描
 # ---------------------------
-st.sidebar.header("分析清單")
-input_str = st.sidebar.text_area("輸入台股代號 (例: 2330.TW, 2454.TW)")
-ticker_list = [t.strip().upper() for t in input_str.split(",") if t.strip()]
+if st.button("🚀 自動掃描全市場 RS 強勢股"):
+    with st.spinner("抓取上市＋上櫃股票並計算 RS... (首次執行較慢)"):
+        twse = get_twse_list()
+        tpex = get_tpex_list()
+        stock_list = list(set(twse + tpex))
 
-if st.sidebar.button("執行完整計算"):
-    if not ticker_list:
-        st.error("請輸入股票代號")
-    else:
-        with st.spinner("抓取 TWSE 官方資料中..."):
-            m_close = fetch_twii_data()
-            all_data = fetch_bulk_data(ticker_list)
+        m_close = fetch_twii_data()
 
-            results = []
-            for ticker in ticker_list:
-                res = analyze_stock(ticker, all_data, m_close)
-                if res:
-                    results.append(res)
+        results = []
+        for sid in stock_list:
+            res = analyze_stock(sid, m_close)
+            if res:
+                results.append(res)
 
-            if not results:
-                st.warning("無符合條件股票")
-            else:
-                df_res = pd.DataFrame(results)
-                df_res = df_res.sort_values(
-                    by=["總得分", "RS年強度", "RS季強度"],
-                    ascending=[False, False, False]
-                )
+        df_res = pd.DataFrame(results)
+        df_res = df_res.sort_values(
+            by=["RS年強度", "RS季強度", "總得分"],
+            ascending=False
+        )
 
-                st.success(f"完成！共 {len(df_res)} 檔強勢股")
-                st.dataframe(df_res, use_container_width=True, height=600)
+        st.success(f"完成掃描，共 {len(df_res)} 檔強勢股")
+        st.dataframe(df_res.head(50), use_container_width=True, height=600)
 
-                csv = df_res.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("下載CSV", csv, f"TW_RS_{now_tw.strftime('%Y%m%d')}.csv", "text/csv")
-else:
-    st.info("請輸入股票代號並執行分析")
+        csv = df_res.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("下載完整RS排序", csv, "TW_RS_Ranking.csv", "text/csv")
