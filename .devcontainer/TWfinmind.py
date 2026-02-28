@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import time
 from FinMind.data import DataLoader
 
-st.set_page_config(page_title="台股 RS + 趨勢模板八點準則", layout="wide")
+st.set_page_config(page_title="台股 RS + 趨勢模板八點準則（含中文名稱）", layout="wide")
 
 # ────────────────────────────────────────────────
 # Sidebar 設定
@@ -24,16 +24,27 @@ else:
     st.sidebar.warning("未輸入 Token → 使用免費額度")
 
 # ────────────────────────────────────────────────
-# 取得台股清單
+# 取得台股清單（含中文名稱）
 # ────────────────────────────────────────────────
 @st.cache_data(ttl=86400 * 7)
 def get_all_stocks(_dl):
     try:
         df = _dl.taiwan_stock_info()
+        # 保留需要的欄位：股票代碼 + 中文名稱 + 產業別（可選）
+        df = df[['stock_id', 'stock_name']].drop_duplicates()
         df = df[df['stock_id'].str.match(r'^\d{4}$|^00\d{2}$')]
         return df.sort_values('stock_id')
     except:
-        return pd.DataFrame({'stock_id': ['2330','2317','2454','2308','2412','0050','006208']})
+        # 備用清單（含中文名稱）
+        fallback = [
+            {'stock_id': '2330', 'stock_name': '台積電'},
+            {'stock_id': '2317', 'stock_name': '鴻海'},
+            {'stock_id': '2454', 'stock_name': '聯發科'},
+            {'stock_id': '2308', 'stock_name': '台達電'},
+            {'stock_id': '2412', 'stock_name': '中華電'},
+            {'stock_id': '0050', 'stock_name': '元大台灣50'},
+        ]
+        return pd.DataFrame(fallback)
 
 # ────────────────────────────────────────────────
 # 載入股價資料（含成交量）
@@ -43,8 +54,7 @@ def load_price_data(token_input):
     dl = DataLoader(token=token_input) if token_input else DataLoader()
 
     stock_info = get_all_stocks(dl)
-    all_ids = stock_info['stock_id'].tolist()
-    stock_list = all_ids[:max_load]
+    stock_list = stock_info['stock_id'].tolist()[:max_load]
 
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=1000)).strftime("%Y-%m-%d")
@@ -69,13 +79,18 @@ def load_price_data(token_input):
 
     if not data_list:
         st.error("無法取得資料，請檢查 Token 或網路")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     price_df = pd.concat(data_list, ignore_index=True)
     price_df = price_df.sort_values(['stock_id', 'date']).rename(columns={'date': 'trade_date', 'Trading_Volume': 'volume'})
-    return price_df
 
-price_df = load_price_data(token)
+    # 合併中文名稱
+    stock_info = stock_info.set_index('stock_id')
+    price_df['stock_name'] = price_df['stock_id'].map(stock_info['stock_name'])
+
+    return price_df, stock_info.reset_index()
+
+price_df, stock_info_df = load_price_data(token)
 
 if price_df.empty:
     st.stop()
@@ -83,18 +98,18 @@ if price_df.empty:
 # ────────────────────────────────────────────────
 # 計算 RS + 趨勢模板八點 + 總得分
 # ────────────────────────────────────────────────
-def calc_rs_and_trend_template(df):
+def calc_rs_and_trend_template(df, stock_info):
     if df.empty:
         return pd.DataFrame()
 
     df = df.copy()
 
-    # 計算移動平均線
+    # 移動平均線
     df['ma50']  = df.groupby('stock_id')['close'].rolling(50).mean().reset_index(0, drop=True)
     df['ma150'] = df.groupby('stock_id')['close'].rolling(150).mean().reset_index(0, drop=True)
     df['ma200'] = df.groupby('stock_id')['close'].rolling(200).mean().reset_index(0, drop=True)
 
-    # 計算 RS（簡化版：近240日漲幅排名）
+    # RS 計算
     df["r3"]  = df.groupby("stock_id")["close"].pct_change(60)
     df["r6"]  = df.groupby("stock_id")["close"].pct_change(120)
     df["r9"]  = df.groupby("stock_id")["close"].pct_change(180)
@@ -111,42 +126,28 @@ def calc_rs_and_trend_template(df):
 
     latest["rs_raw"] = latest["r3"] * 2 + latest["r6"] + latest["r9"] + latest["r12"]
     latest["RS"] = latest["rs_raw"].rank(pct=True) * 100
-    latest = latest.sort_values("RS", ascending=False)
 
-    # ── 趨勢模板八點準則 ──
+    # 合併中文名稱
+    latest = latest.merge(stock_info[['stock_id', 'stock_name']], on='stock_id', how='left')
+
+    # 趨勢模板八點
     def check_trend_template(row):
         checks = []
 
-        # 1. 股價 > 150日 & 200日均線
-        checks.append(row['close'] > row['ma150'] and row['close'] > row['ma200'])
-
-        # 2. 150日均線 > 200日均線
-        checks.append(row['ma150'] > row['ma200'])
-
-        # 3. 200日均線上升（最近一個月 ma200 > 前值）
+        checks.append(row['close'] > row['ma150'] and row['close'] > row['ma200'])  # 1
+        checks.append(row['ma150'] > row['ma200'])  # 2
         ma200_series = df[df['stock_id'] == row['stock_id']]['ma200'].tail(20)
-        checks.append(ma200_series.is_monotonic_increasing if len(ma200_series) >= 10 else False)
-
-        # 4. 股價距離200日均線 ≤ 25%
+        checks.append(ma200_series.is_monotonic_increasing if len(ma200_series) >= 10 else False)  # 3
         dist_200 = (row['close'] - row['ma200']) / row['ma200']
-        checks.append(dist_200 <= 0.25)
-
-        # 5. 股價接近52週新高（距離 ≤ 15%）
+        checks.append(dist_200 <= 0.25)  # 4
         high_52w = df[df['stock_id'] == row['stock_id']]['close'].tail(252).max()
-        checks.append(row['close'] >= high_52w * 0.85)
-
-        # 6. RS ≥ 70
-        checks.append(row['RS'] >= 70)
-
-        # 7. 股價 > 50日均線
-        checks.append(row['close'] > row['ma50'])
-
-        # 8. 成交量放大（近20日平均量 > 前20日平均量）
+        checks.append(row['close'] >= high_52w * 0.85)  # 5
+        checks.append(row['RS'] >= 70)  # 6
+        checks.append(row['close'] > row['ma50'])  # 7
         recent_vol = df[df['stock_id'] == row['stock_id']]['volume'].tail(20).mean()
         prior_vol = df[df['stock_id'] == row['stock_id']]['volume'].tail(40).head(20).mean()
-        checks.append(recent_vol > prior_vol * 1.1 if not np.isnan(prior_vol) else False)
+        checks.append(recent_vol > prior_vol * 1.1 if not np.isnan(prior_vol) else False)  # 8
 
-        # 計算總分 & 綠勾/紅X
         score = sum(checks)
         marks = ['✓' if c else '✗' for c in checks]
         return score, marks
@@ -154,7 +155,6 @@ def calc_rs_and_trend_template(df):
     results = latest.apply(check_trend_template, axis=1, result_type='expand')
     latest['total_score'], latest['checks'] = results[0], results[1]
 
-    # 展開八點檢查為欄位
     for i in range(8):
         latest[f'item_{i+1}'] = latest['checks'].apply(lambda x: x[i])
 
@@ -162,12 +162,12 @@ def calc_rs_and_trend_template(df):
 
     return latest
 
-rs_df = calc_rs_and_trend_template(price_df)
+rs_df = calc_rs_and_trend_template(price_df, stock_info_df)
 
 # ────────────────────────────────────────────────
 # 主畫面顯示
 # ────────────────────────────────────────────────
-st.title("台股 RS + 趨勢模板八點準則篩選")
+st.title("台股 RS + 趨勢模板八點準則（含中文名稱）")
 
 col_left, col_right = st.columns([4, 1])
 
@@ -183,13 +183,15 @@ with col_left:
     if filtered.empty:
         st.info("目前沒有符合條件的股票")
     else:
-        disp = filtered[['stock_id', 'RS', 'r3', 'total_score', 'item_1', 'item_2', 'item_3', 'item_4',
+        disp = filtered[['stock_id', 'stock_name', 'RS', 'r3', 'total_score',
+                         'item_1', 'item_2', 'item_3', 'item_4',
                          'item_5', 'item_6', 'item_7', 'item_8']].copy()
 
         disp['RS'] = disp['RS'].round(1)
         disp['r3'] = disp['r3'].map(lambda x: f"{x:.2%}" if pd.notna(x) else "-")
+        disp['股票'] = disp['stock_id'] + ' ' + disp['stock_name'].fillna('未知')
 
-        # 綠勾紅X 顏色
+        # 綠勾紅叉顏色
         def color_check(val):
             if val == '✓':
                 return 'color: green; font-weight: bold'
@@ -200,9 +202,10 @@ with col_left:
         styled = disp.style.applymap(color_check, subset=[f'item_{i}' for i in range(1,9)])
 
         st.dataframe(
-            styled,
+            styled[['股票', 'RS', 'r3', 'total_score', 'item_1', 'item_2', 'item_3', 'item_4',
+                    'item_5', 'item_6', 'item_7', 'item_8']],
             column_config={
-                'stock_id': '股票代碼',
+                '股票': st.column_config.TextColumn("股票（代碼 + 名稱）", width="medium"),
                 'RS': 'RS分數',
                 'r3': '3月漲幅',
                 'total_score': st.column_config.NumberColumn('總得分', format="%d"),
@@ -224,10 +227,11 @@ with col_left:
 # ────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("個股走勢檢視")
-selected = st.selectbox("選擇股票", ["-- 請選擇 --"] + rs_df["stock_id"].tolist())
+selected = st.selectbox("選擇股票", ["-- 請選擇 --"] + (rs_df["stock_id"] + " " + rs_df["stock_name"].fillna('')).tolist())
 
 if selected != "-- 請選擇 --":
-    stock_data = price_df[price_df["stock_id"] == selected]
+    sid = selected.split()[0]
+    stock_data = price_df[price_df["stock_id"] == sid]
     if not stock_data.empty:
         st.line_chart(stock_data.set_index("trade_date")["close"])
 
