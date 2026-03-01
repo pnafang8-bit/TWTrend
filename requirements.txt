@@ -5,3 +5,6 @@ FinMind
 python-dateutil
 tqdm>=4.66.0
 matplotlib>=3.7.0   # ← 新增這行（建議加版本避免不相容）
+sqlalchemy
+pg8000
+psycopg2-binary
